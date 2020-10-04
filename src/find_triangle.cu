@@ -30,12 +30,10 @@ int* fill_array(int dim);
 double distance(int i,int central_node,int *array,int dim);
 bool cross_product(vec vec_1, vec vec_2);
 void knn_seq(int *array, int dim, int central_node);
-int div_up(int blocks,int dim);
-void selectNodes(int *candidates, int *array, int dim, int blocks, int central_node);
+void select_nodes(int *candidates, int *array, int dim, int blocks, int central_node);
 
 __device__ int device_cross_product(int x_1, int y_1, int x_2, int y_2);
 __global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_array, double *device_distances, int* device_candidates, int dim, int central_node_idx, int central_node_x,int central_node_y, int numofblocks, int shared_lim_idx);
-__global__ void knn_kenrel_candidates(double *device_distances, int *__restrict__ device_candidates, int dim);
 
 
 int main(int argc,char* argv[]){
@@ -131,7 +129,7 @@ int main(int argc,char* argv[]){
     cudaMemcpy(candidates,device_candidates,2*blocks*sizeof(int),cudaMemcpyDeviceToHost);
     //cudaDeviceSynchronize();
 
-    selectNodes(candidates,array,dim,blocks, central_node);
+    select_nodes(candidates,array,dim,blocks, central_node);
     gettimeofday(&stop_gpu,NULL);
 
     long unsigned int gpu_t = (stop_gpu.tv_sec - start_gpu.tv_sec)*1000000 + (stop_gpu.tv_usec - start_gpu.tv_usec);
@@ -294,7 +292,7 @@ __global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_
 
 
 
-void selectNodes(int *candidates, int *array, int dim, int blocks, int central_node){
+void select_nodes(int *candidates, int *array, int dim, int blocks, int central_node){
 
 
     double min_dist = distance(candidates[blocks],central_node,array,dim);
@@ -349,40 +347,6 @@ void selectNodes(int *candidates, int *array, int dim, int blocks, int central_n
 
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-__global__ void knn_kenrel_candidates(double *device_distances, int *device_candidates, int dim);
-
-
-
-
-
-int div_up(int blocks,int dim){
-    int thr = 32;
-    int div = (int)(blocks/dim) + blocks%dim;
-    div = (int)(div/thr);
-    div++;
-
-    return thr*div;
-
-}
 
 double distance(int i,int central_node,int *array,int dim){
     double d = pow(array[i] - array[central_node],2) + pow(array[i+dim] - array[central_node + dim],2);
