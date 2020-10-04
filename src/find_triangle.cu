@@ -17,6 +17,18 @@
 
 #define upper_bound 10000
 #define SHARED_LIMIT 16384
+#define TOTAL_POINTS 131072
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true){
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+
 
 typedef struct vec{
     int x;
@@ -33,7 +45,12 @@ void knn_seq(int *array, int dim, int central_node);
 void select_nodes(int *candidates, int *array, int dim, int blocks, int central_node);
 
 __device__ int device_cross_product(int x_1, int y_1, int x_2, int y_2);
-__global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_array, double *device_distances, int* device_candidates, int dim, int central_node_idx, int central_node_x,int central_node_y, int numofblocks, int shared_lim_idx);
+__global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_array,
+                                    double *device_distances, int* device_candidates,
+                                    int dim,
+                                    int central_node_idx, int central_node_x,int central_node_y,
+                                     int numofblocks, int shared_lim_idx,
+                                    int offset,int candidates_len);
 
 
 int main(int argc,char* argv[]){
@@ -44,34 +61,57 @@ int main(int argc,char* argv[]){
 
    
 
-    
+    cudaStream_t strm;
+    cudaStreamCreate(&strm);
+
     srand(time(NULL));
 
     int dim = atoi(argv[1]);
    
-    if(dim > 131072){
-        printf("Maximum size of points : 131072 \n");
-        return -1;
-    }
-
-    
     int* array = fill_array(dim);
     int central_node = (rand()%dim) + 1;
     printf("Central_node : %d \n",central_node);
 
     int *device_array;
     size_t pitch;
-    cudaMallocPitch(&device_array,&pitch,dim*sizeof(int),2);
-    cudaMemcpy2D(device_array,pitch,array,dim*sizeof(int),dim*sizeof(int),2,cudaMemcpyHostToDevice);
+    gpuErrchk(cudaMallocPitch(&device_array,&pitch,dim*sizeof(int),2));
+    gpuErrchk(cudaMemcpy2D(device_array,pitch,array,dim*sizeof(int),dim*sizeof(int),2,cudaMemcpyHostToDevice));
 
     const int blocks = atoi(argv[2]);
-    const int threads = (int)(dim/blocks)+dim%blocks;
+    int threads;
+
+    int *device_candidates, *candidates;
+    int iter_gpu = dim/TOTAL_POINTS;
+    size_t candidates_sz;
+    int candidates_len;
+
+    if(dim > TOTAL_POINTS){
+       
+        threads = (int)(TOTAL_POINTS/blocks)+TOTAL_POINTS%blocks;
+        candidates_sz = 2*iter_gpu*blocks*sizeof(int);
+        candidates_len = blocks*iter_gpu*2;
+
+        gpuErrchk(cudaMalloc(&device_candidates,candidates_sz));
+        candidates = (int*)malloc(candidates_sz);
+    }
+    else{
+
+        threads = (int)(dim/blocks)+dim%blocks;
+        candidates_sz = 2*blocks*sizeof(int);
+        candidates_len = 2*blocks;
+
+
+        gpuErrchk(cudaMalloc(&device_candidates,candidates_sz));
+        candidates = (int*)malloc(candidates_sz);
+    }
+
+
     int shared_mem = threads;
 
     double *device_distances;
 
     if(dim > SHARED_LIMIT){
-        cudaMalloc(&device_distances,(dim-SHARED_LIMIT)*sizeof(double));
+        gpuErrchk(cudaMalloc(&device_distances,(TOTAL_POINTS-SHARED_LIMIT)*sizeof(double)));
         shared_mem =  (int)(SHARED_LIMIT/blocks)+SHARED_LIMIT%blocks;
     }
     
@@ -109,27 +149,29 @@ int main(int argc,char* argv[]){
     
     long unsigned int cpu_t = (stop_cpu.tv_sec - start_cpu.tv_sec)*1000000 + (stop_cpu.tv_usec - start_cpu.tv_usec);
     
-    int *device_candidates, *candidates;
-    cudaMalloc(&device_candidates,2*blocks*sizeof(int));
-    candidates = (int*)malloc(sizeof(int)*2*blocks);
     
 
     /** 
         Start ticking GPU vresion of 
         KNN algorithm
     **/ 
+   
+
 
     gettimeofday(&start_gpu,NULL);
-    knn_kernel_distance<<<blocks,threads,shared_mem*sizeof(double)>>>(pitch,device_array,device_distances,
+    
+    for(int i=0; i < iter_gpu; i++){
+        
+        knn_kernel_distance<<<blocks,threads,shared_mem*sizeof(double)>>>(pitch,device_array,device_distances,
                                                                       device_candidates,dim,central_node,array[central_node],
-                                                                      array[central_node+dim],blocks,shared_mem);
+                                                                      array[central_node+dim],blocks,shared_mem,i,candidates_len);
+                                                                    
+    }                                                              
 
-                                                                      
+    gpuErrchk(cudaMemcpy(candidates,device_candidates,candidates_sz,cudaMemcpyDeviceToHost));
+    
 
-    cudaMemcpy(candidates,device_candidates,2*blocks*sizeof(int),cudaMemcpyDeviceToHost);
-    //cudaDeviceSynchronize();
-
-    select_nodes(candidates,array,dim,blocks, central_node);
+    select_nodes(candidates,array,dim,candidates_len/2, central_node);
     gettimeofday(&stop_gpu,NULL);
 
     long unsigned int gpu_t = (stop_gpu.tv_sec - start_gpu.tv_sec)*1000000 + (stop_gpu.tv_usec - start_gpu.tv_usec);
@@ -139,9 +181,9 @@ int main(int argc,char* argv[]){
 
     printf("[+][+][+] GPU PROFILING : %lu us \n\n",gpu_t);
 
-    cudaFree(device_candidates);
-    cudaFree(device_array);
-    cudaFree(device_distances);
+    gpuErrchk(cudaFree(device_candidates));
+    gpuErrchk(cudaFree(device_array));
+    gpuErrchk(cudaFree(device_distances));
 
 
     return 0;
@@ -159,17 +201,22 @@ __device__ int device_cross_product(int x_1,int y_1,int x_2,int y_2){
   
 }
 
-
 __global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_array,
                                     double *distances, int* __restrict__ device_candidates,
                                     int dim, int central_node_idx,
                                     int central_node_x,int central_node_y,
-                                    int numofblocks, int shared_lim_idx){
+                                    int numofblocks, int shared_lim_idx, int offset, int candidates_len){
 
                                         
 
     int row = threadIdx.x + blockIdx.x*blockDim.x;
     
+    if(row > TOTAL_POINTS){
+        return;
+    }
+
+    row = row + TOTAL_POINTS*offset;
+
     int const_x = central_node_x;
     int const_y = central_node_y;
     double d;
@@ -190,7 +237,7 @@ __global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_
     if(threadIdx.x < shared_lim_idx)    
         device_distances[threadIdx.x] = d;
     else
-        distances[row] = d;
+        distances[row - TOTAL_POINTS*offset] = d;
         
     
 
@@ -218,7 +265,7 @@ __global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_
             if(i < shared_lim_idx )
                 d = device_distances[i];
             else 
-                d = distances[idx];
+                d = distances[idx - TOTAL_POINTS*offset];
 
             if(d < min_dist  &&  idx != central_node_idx && *element_x != const_x && *element_y != const_y){
 
@@ -240,7 +287,7 @@ __global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_
             if(i < shared_lim_idx )
                 d = device_distances[i];
             else 
-                d = distances[idx];
+                d = distances[idx - TOTAL_POINTS*offset];
 
             if(d < second_min_dist && d > min_dist){
                
@@ -277,9 +324,10 @@ __global__ void knn_kernel_distance(size_t pitch,const int* __restrict__ device_
 
 
         }
+
         
-        device_candidates[blockIdx.x] = k_1;
-        device_candidates[blockIdx.x+numofblocks] = k_2;
+        device_candidates[blockIdx.x + numofblocks*offset] = k_1;
+        device_candidates[candidates_len/2 + blockIdx.x + numofblocks*offset] = k_2;
 
        
 
