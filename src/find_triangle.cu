@@ -1,7 +1,7 @@
 /**
   Author : chares moustakas
   
-  Running for Geforse 820M. You may need to change SHARED_LIMIT for different GPUs. Have fun.
+  Running under Geforce 820M. You may need to change SHARED_LIMIT for different GPUs. Have fun.
 **/
 
 
